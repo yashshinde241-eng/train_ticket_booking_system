@@ -2,39 +2,40 @@ import { useBooking } from '../context/BookingContext';
 import { generatePNR, formatDate, formatDay, CLASS_INFO } from '../counter';
 import { useState, useEffect, useRef } from 'react';
 
-export default function Confirmation({ totalFare, onNewBooking }) {
-  const { selectedTrain, seatSelection, searchParams, user, confirmBooking } = useBooking();
-  const [pnr]     = useState(() => generatePNR());
-  const [saved,   setSaved]   = useState(false);
-  const [saving,  setSaving]  = useState(false);
-  const savedRef  = useRef(false); // prevent double-save in StrictMode
+export default function Confirmation({ totalFare, paymentId, onNewBooking }) {
+  const { selectedTrain, seatSelection, searchParams, user, confirmBooking, sendConfirmationEmail } = useBooking();
+  const [pnr]    = useState(() => generatePNR());
+  const [saved,  setSaved]  = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [emailMsg, setEmailMsg] = useState('');
+  const savedRef = useRef(false);
 
   const selectedClass = selectedTrain?.classes.find(c => c.code === seatSelection.classType);
   const classInfo     = CLASS_INFO[seatSelection.classType] || { name: seatSelection.classType };
 
-  // Generate seat assignments
+  const passengerDetails = seatSelection.passengerDetails || [];
+  const passengerNames   = seatSelection.passengerNames   || [];
+  const contactEmail     = seatSelection.contactEmail     || user?.email || '';
+
   const seats = Array.from({ length: seatSelection.passengers }, (_, i) => ({
-    name:   i === 0 ? (user?.name || 'Passenger') : `Co-Passenger ${i + 1}`,
-    age:    25 + i * 5,
-    gender: i % 2 === 0 ? 'M' : 'F',
+    name:   passengerDetails[i]?.name   || passengerNames[i] || (i === 0 ? (user?.username || 'Passenger') : `Co-Passenger ${i + 1}`),
+    age:    passengerDetails[i]?.age    || (25 + i * 5),
+    gender: passengerDetails[i]?.gender || (i % 2 === 0 ? 'Male' : 'Female'),
     berth:  seatSelection.berthPreference === 'No Preference'
               ? ['Lower', 'Middle', 'Upper'][i % 3]
               : seatSelection.berthPreference,
-    seat:   `B${Math.floor(Math.random() * 8) + 1}/${40 + i}`,
+    seat:   seatSelection.selectedBerths?.[i] || `B${Math.floor(Math.random() * 8) + 1}/${40 + i}`,
     status: 'CNF',
   }));
 
   const serviceCharge = 35 * seatSelection.passengers;
-  const gst           = selectedClass
-    ? Math.round(selectedClass.price * seatSelection.passengers * 0.05)
-    : 0;
-  const txnId = `TXN${Date.now().toString().slice(-10)}`;
+  const gst    = selectedClass ? Math.round(selectedClass.price * seatSelection.passengers * 0.05) : 0;
+  const txnId  = `TXN${Date.now().toString().slice(-10)}`;
 
-  // ── Save ticket to IndexedDB once on mount ─────────────────────────────────
+  // ── Save ticket + auto-send confirmation email on mount ───────────────────
   useEffect(() => {
     if (savedRef.current) return;
     savedRef.current = true;
-
     if (!selectedTrain || !user) return;
 
     setSaving(true);
@@ -52,14 +53,41 @@ export default function Confirmation({ totalFare, onNewBooking }) {
       quota:       searchParams.quota,
       passengers:  seatSelection.passengers,
       berthPref:   seatSelection.berthPreference,
+      contactEmail,
+      paymentId:   paymentId || null,
       seats,
       totalFare,
       txnId,
-      status:      'CONFIRMED',
+      status: 'CONFIRMED',
     };
 
     confirmBooking(ticketData)
-      .then(() => { setSaved(true); setSaving(false); })
+      .then(async () => {
+        setSaved(true);
+        setSaving(false);
+        // Auto-send confirmation email immediately after booking is saved
+        if (contactEmail) {
+          try {
+            const previewUrl = await sendConfirmationEmail({
+              pnr,
+              trainName:   selectedTrain.name,
+              trainNumber: selectedTrain.number,
+              from:        searchParams.from,
+              to:          searchParams.to,
+              date:        searchParams.date,
+              classCode:   seatSelection.classType,
+              passengers:  seatSelection.passengers,
+              totalFare,
+            }, contactEmail);
+            setEmailMsg(previewUrl
+              ? `Confirmation email sent! Preview: ${previewUrl}`
+              : `Confirmation email sent to ${contactEmail}`
+            );
+          } catch {
+            setEmailMsg('Ticket saved but email could not be sent.');
+          }
+        }
+      })
       .catch(err => { console.error('[Confirmation] Save error:', err); setSaving(false); });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -69,17 +97,10 @@ export default function Confirmation({ totalFare, onNewBooking }) {
       <div className="success-banner">
         <div className="success-icon">✓</div>
         <h2>Booking Confirmed!</h2>
-        <p>Your ticket has been booked successfully. Check your email for details.</p>
-        {saving && (
-          <p style={{ fontSize: '0.82rem', opacity: 0.7, marginTop: '0.25rem' }}>
-            ⏳ Saving to database...
-          </p>
-        )}
-        {saved && (
-          <p style={{ fontSize: '0.82rem', color: '#86efac', marginTop: '0.25rem' }}>
-             Ticket saved to database — visible in My Bookings
-          </p>
-        )}
+        <p>Your ticket has been booked successfully.</p>
+        {saving   && <p style={{ fontSize: '0.82rem', opacity: 0.7, marginTop: '0.25rem' }}>⏳ Saving to database...</p>}
+        {saved    && <p style={{ fontSize: '0.82rem', color: '#86efac', marginTop: '0.25rem' }}>✓ Ticket saved — visible in My Bookings</p>}
+        {emailMsg && <p style={{ fontSize: '0.82rem', color: '#86efac', marginTop: '0.25rem' }}>📧 {emailMsg}</p>}
       </div>
 
       {/* TICKET */}
@@ -106,14 +127,12 @@ export default function Confirmation({ totalFare, onNewBooking }) {
               <div className="depart-time">{selectedTrain?.departure}</div>
               <div className="depart-date">{formatDay(searchParams.date)}, {formatDate(searchParams.date)}</div>
             </div>
-
             <div className="route-middle">
               <div className="train-icon"></div>
               <div className="dotted-line" />
               <div className="duration">{selectedTrain?.duration}</div>
               <div className="dotted-line" />
             </div>
-
             <div className="station-block right">
               <div className="station-name">{searchParams.to?.substring(0, 6).toUpperCase()}</div>
               <div className="station-city">{searchParams.to}</div>
@@ -126,22 +145,10 @@ export default function Confirmation({ totalFare, onNewBooking }) {
 
           {/* DETAILS GRID */}
           <div className="ticket-details-grid">
-            <div className="detail-item">
-              <div className="detail-label">Train</div>
-              <div className="detail-val">{selectedTrain?.name}</div>
-            </div>
-            <div className="detail-item">
-              <div className="detail-label">Train No.</div>
-              <div className="detail-val">{selectedTrain?.number}</div>
-            </div>
-            <div className="detail-item">
-              <div className="detail-label">Class</div>
-              <div className="detail-val">{seatSelection.classType} – {classInfo.name}</div>
-            </div>
-            <div className="detail-item">
-              <div className="detail-label">Quota</div>
-              <div className="detail-val">{searchParams.quota}</div>
-            </div>
+            <div className="detail-item"><div className="detail-label">Train</div><div className="detail-val">{selectedTrain?.name}</div></div>
+            <div className="detail-item"><div className="detail-label">Train No.</div><div className="detail-val">{selectedTrain?.number}</div></div>
+            <div className="detail-item"><div className="detail-label">Class</div><div className="detail-val">{seatSelection.classType} – {classInfo.name}</div></div>
+            <div className="detail-item"><div className="detail-label">Quota</div><div className="detail-val">{searchParams.quota}</div></div>
           </div>
 
           <hr className="ticket-divider" />
@@ -149,10 +156,7 @@ export default function Confirmation({ totalFare, onNewBooking }) {
           {/* PASSENGERS TABLE */}
           <table className="passenger-table">
             <thead>
-              <tr>
-                <th>#</th><th>Name</th><th>Age</th><th>Gender</th>
-                <th>Berth</th><th>Seat</th><th>Status</th>
-              </tr>
+              <tr><th>#</th><th>Name</th><th>Age</th><th>Gender</th><th>Berth</th><th>Seat</th><th>Status</th></tr>
             </thead>
             <tbody>
               {seats.map((s, i) => (
@@ -176,7 +180,7 @@ export default function Confirmation({ totalFare, onNewBooking }) {
             <div>
               <div className="detail-item" style={{ marginBottom: '0.5rem' }}>
                 <div className="detail-label">Booked By</div>
-                <div className="detail-val">{user?.name?.toUpperCase()}</div>
+                <div className="detail-val">{user?.username?.toUpperCase()}</div>
               </div>
               <div className="detail-item">
                 <div className="detail-label">Transaction ID</div>
@@ -216,13 +220,12 @@ export default function Confirmation({ totalFare, onNewBooking }) {
         </div>
       </div>
 
-      {/* ACTIONS */}
+      {/* ACTIONS — only Print + New Booking */}
       <div className="action-btns">
         <button className="btn-outline" onClick={() => setTimeout(() => window.print?.(), 100)}>
           🖨 Print Ticket
         </button>
-        <button className="btn-outline"> Email Ticket</button>
-        <button className="btn-home" onClick={onNewBooking}> New Booking</button>
+        <button className="btn-home" onClick={onNewBooking}>🏠 New Booking</button>
       </div>
 
       <div style={{ marginTop: '1rem', padding: '1rem', background: '#fefce8', border: '1px solid #fde68a', borderRadius: '10px', fontSize: '0.82rem', color: '#92400e', lineHeight: 1.6 }}>
